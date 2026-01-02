@@ -1,6 +1,7 @@
 <p align="center">
-  <img src="YOUR_PNG_URL" width="160" />
+  <img src="https://raw.githubusercontent.com/igris00001/File/main/Logo.png" width="160" />
 </p>
+
 
 
 # Telegram File Sharing Bot
