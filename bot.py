@@ -4,20 +4,40 @@ import os
 import re
 import json
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ===== ENV =====
+# ======================================================
+# 🔹 DUMMY HTTP SERVER (FOR RENDER FREE WEB SERVICE)
+# ======================================================
+
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), DummyHandler)
+    server.serve_forever()
+
+threading.Thread(target=run_dummy_server, daemon=True).start()
+
+# ======================================================
+# 🔹 BOT CONFIG
+# ======================================================
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# ===== FORCE JOIN CHANNELS =====
 FORCE_CHANNELS = [
     "@Letsucks",
     "@USRxMEE"
 ]
 
-# ===== SETTINGS =====
 LINK_EXPIRY_SECONDS = 10 * 60  # ⏳ 10 minutes
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -26,7 +46,10 @@ LINK_RE = re.compile(r"t.me/c/\d+/(\d+)")
 USERS_FILE = "users.json"
 LINKS_FILE = "links.json"
 
-# ===== INIT FILES =====
+# ======================================================
+# 🔹 FILE INIT
+# ======================================================
+
 if not os.path.exists(USERS_FILE):
     with open(USERS_FILE, "w") as f:
         json.dump([], f)
@@ -53,7 +76,10 @@ def load_links():
 def save_links(data):
     json.dump(data, open(LINKS_FILE, "w"), indent=2)
 
-# ===== FORCE JOIN CHECK =====
+# ======================================================
+# 🔹 FORCE JOIN
+# ======================================================
+
 def is_joined(user_id):
     for ch in FORCE_CHANNELS:
         try:
@@ -83,7 +109,10 @@ def join_buttons(code):
     )
     return kb
 
-# ===== CALLBACK: GET FILE =====
+# ======================================================
+# 🔹 CALLBACK: GET FILE
+# ======================================================
+
 @bot.callback_query_handler(func=lambda c: c.data.startswith("get_"))
 def get_file(call):
     code = call.data.split("_", 1)[1]
@@ -94,7 +123,6 @@ def get_file(call):
         return
 
     data = links[code]
-
     if time.time() > data["expires"]:
         del links[code]
         save_links(links)
@@ -105,6 +133,106 @@ def get_file(call):
         bot.answer_callback_query(call.id, "❌ Join all channels first!", show_alert=True)
         return
 
+    bot.copy_message(
+        call.message.chat.id,
+        CHANNEL_ID,
+        data["message_id"]
+    )
+
+# ======================================================
+# 🔹 START COMMAND
+# ======================================================
+
+@bot.message_handler(commands=["start"])
+def start(msg):
+    add_user(msg.from_user.id)
+    args = msg.text.split()
+
+    if len(args) == 2:
+        code = args[1]
+        links = load_links()
+
+        if code not in links:
+            bot.reply_to(msg, "❌ Link expired or invalid.")
+            return
+
+        data = links[code]
+        if time.time() > data["expires"]:
+            del links[code]
+            save_links(links)
+            bot.reply_to(msg, "❌ Link expired.")
+            return
+
+        if not is_joined(msg.from_user.id):
+            bot.send_message(
+                msg.chat.id,
+                "🔒 Join all channels to get the file:",
+                reply_markup=join_buttons(code)
+            )
+            return
+
+        bot.copy_message(msg.chat.id, CHANNEL_ID, data["message_id"])
+    else:
+        bot.reply_to(msg, "👋 Welcome!")
+
+# ======================================================
+# 🔹 ADMIN ACTIONS
+# ======================================================
+
+@bot.message_handler(func=lambda m: True)
+def admin_handler(msg):
+    add_user(msg.from_user.id)
+
+    if msg.from_user.id != ADMIN_ID:
+        return
+
+    # 📢 BROADCAST (TEXT / MEDIA)
+    if msg.text and msg.text.startswith("/broadcast"):
+        users = load_users()
+        sent = 0
+
+        for uid in users:
+            try:
+                if msg.reply_to_message:
+                    bot.copy_message(uid, msg.chat.id, msg.reply_to_message.message_id)
+                else:
+                    text = msg.text.replace("/broadcast", "").strip()
+                    if text:
+                        bot.send_message(uid, text)
+                sent += 1
+            except:
+                pass
+
+        bot.reply_to(msg, f"✅ Broadcast sent to {sent} users.")
+        return
+
+    # 🔗 CREATE EXPIRING LINK
+    match = LINK_RE.search(msg.text or "")
+    if not match:
+        return
+
+    message_id = int(match.group(1))
+    links = load_links()
+
+    code = str(int(time.time() * 1000))
+    links[code] = {
+        "message_id": message_id,
+        "expires": time.time() + LINK_EXPIRY_SECONDS
+    }
+
+    save_links(links)
+
+    bot.reply_to(
+        msg,
+        "✅ Download link (expires in 10 minutes):\n\n"
+        f"https://t.me/{bot.get_me().username}?start={code}"
+    )
+
+# ======================================================
+# 🔹 START BOT
+# ======================================================
+
+bot.infinity_polling()
     bot.copy_message(
         call.message.chat.id,
         CHANNEL_ID,
