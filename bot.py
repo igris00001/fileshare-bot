@@ -1,11 +1,21 @@
 # Made by @xchup
-# Pyrogram File Sharing Bot with Expiring Links
+# Pyrogram File Sharing Bot
+# Permanent Links + Media Auto Expiry + Broadcast System
 
 import os
 import time
 import asyncio
+import logging
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# ================= LOGGING =================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+log = logging.getLogger(__name__)
 
 # ================= CONFIG =================
 
@@ -13,15 +23,15 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-ADMIN_ID = int(os.getenv("ADMIN_ID"))          # single admin
-DB_CHANNEL_ID = int(os.getenv("CHANNEL_ID"))   # private storage channel
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+DB_CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
 FORCE_CHANNELS = [
-    -1003599850450,   # channel 1 ID
-    -1001234567890    # channel 2 ID (add more if needed)
+    -1003599850450,
+    -1001234567890
 ]
 
-LINK_EXPIRY = 600  # 10 minutes (seconds)
+MEDIA_LIFETIME = 15 * 60  # 15 minutes
 
 # ================= BOT =================
 
@@ -32,12 +42,15 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
-# In-memory link store
-LINKS = {}  # token: (message_id, expire_time)
+# token -> message_id (permanent)
+LINKS = {}
+
+# user database (in memory)
+USERS = set()
 
 # ================= HELPERS =================
 
-async def is_joined(user_id):
+async def is_joined(user_id: int) -> bool:
     for ch in FORCE_CHANNELS:
         try:
             member = await app.get_chat_member(ch, user_id)
@@ -57,78 +70,147 @@ def join_buttons():
                 url=f"https://t.me/c/{str(ch)[4:]}"
             )
         ])
-    buttons.append([InlineKeyboardButton("📥 Get File", callback_data="recheck")])
+    buttons.append([
+        InlineKeyboardButton("📥 Get File", callback_data="get_file")
+    ])
     return InlineKeyboardMarkup(buttons)
 
+
+def expired_text(msg):
+    if msg.video:
+        return "📹 Video expired"
+    if msg.document:
+        return "📄 Document expired"
+    if msg.photo:
+        return "🖼 Image expired"
+    if msg.audio:
+        return "🎵 Audio expired"
+    return "❌ Media expired"
+
+
+async def auto_delete(chat_id, message):
+    await asyncio.sleep(MEDIA_LIFETIME)
+    try:
+        await message.delete()
+        await app.send_message(chat_id, expired_text(message))
+    except:
+        pass
 
 # ================= START =================
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
+    USERS.add(message.from_user.id)
+
     args = message.command
 
     if len(args) == 2:
         token = args[1]
 
         if token not in LINKS:
-            return await message.reply("❌ Link expired or invalid.")
-
-        msg_id, exp = LINKS[token]
-        if time.time() > exp:
-            LINKS.pop(token, None)
-            return await message.reply("⌛ This link has expired.")
+            await message.reply("❌ Invalid link.")
+            return
 
         if not await is_joined(message.from_user.id):
-            return await message.reply(
+            await message.reply(
                 "🔒 Join all channels to get the file:",
                 reply_markup=join_buttons()
             )
+            return
 
-        await client.copy_message(
+        sent = await client.copy_message(
             chat_id=message.chat.id,
             from_chat_id=DB_CHANNEL_ID,
-            message_id=msg_id
+            message_id=LINKS[token]
         )
+
+        asyncio.create_task(auto_delete(message.chat.id, sent))
         return
 
-    await message.reply("👋 Welcome!\nSend me a Telegram file link (admin only).")
+    await message.reply("👋 Welcome!")
 
+# ================= CALLBACK =================
 
-# ================= RECHECK =================
+@app.on_callback_query(filters.regex("get_file"))
+async def get_file(client, query):
+    USERS.add(query.from_user.id)
 
-@app.on_callback_query(filters.regex("recheck"))
-async def recheck(client, query):
-    if await is_joined(query.from_user.id):
-        await query.message.edit_text(
-            "✅ Verified!\nNow open the download link again."
-        )
-    else:
+    if not await is_joined(query.from_user.id):
         await query.answer("❌ Join all channels first!", show_alert=True)
+        return
 
+    token = query.message.text.split("start=")[-1].strip()
+
+    if token not in LINKS:
+        await query.answer("❌ Invalid link", show_alert=True)
+        return
+
+    sent = await client.copy_message(
+        chat_id=query.message.chat.id,
+        from_chat_id=DB_CHANNEL_ID,
+        message_id=LINKS[token]
+    )
+
+    await query.message.delete()
+    asyncio.create_task(auto_delete(query.message.chat.id, sent))
+    await query.answer("📦 File sent!")
 
 # ================= ADMIN LINK CREATION =================
 
-@app.on_message(filters.private & filters.text)
-async def admin_handler(client, message):
-    if message.from_user.id != ADMIN_ID:
-        return
-
+@app.on_message(filters.private & filters.text & filters.user(ADMIN_ID))
+async def admin_link(client, message):
     if "t.me/c/" not in message.text:
-        return await message.reply("❌ Send a Telegram private file link.")
+        return
 
     try:
         msg_id = int(message.text.split("/")[-1])
     except:
-        return await message.reply("❌ Invalid link.")
+        await message.reply("❌ Invalid Telegram link.")
+        return
 
     token = str(int(time.time() * 1000))
-    LINKS[token] = (msg_id, time.time() + LINK_EXPIRY)
+    LINKS[token] = msg_id
+
+    me = await client.get_me()
 
     await message.reply(
-        f"✅ Download link (expires in 10 minutes):\n\n"
-        f"https://t.me/{(await client.get_me()).username}?start={token}"
+        "✅ Permanent download link:\n\n"
+        f"https://t.me/{me.username}?start={token}\n\n"
+        "⏱ Media auto-expires after 15 minutes"
     )
 
+# ================= BROADCAST SYSTEM =================
+
+@app.on_message(filters.command("broadcast") & filters.user(ADMIN_ID))
+async def broadcast(client, message):
+    if not message.reply_to_message:
+        await message.reply(
+            "❌ Reply to a message to broadcast.\n\n"
+            "Usage:\n"
+            "`/broadcast` (reply to text or media)",
+            quote=True
+        )
+        return
+
+    sent = 0
+    failed = 0
+
+    await message.reply("📢 Broadcast started...")
+
+    for user_id in list(USERS):
+        try:
+            await message.reply_to_message.copy(user_id)
+            sent += 1
+        except:
+            failed += 1
+
+        await asyncio.sleep(0.05)  # avoid flood
+
+    await message.reply(
+        f"✅ Broadcast completed\n\n"
+        f"📤 Sent: {sent}\n"
+        f"❌ Failed: {failed}"
+    )
 
 # ================= DUMMY SERVER (RENDER FREE) =================
 
@@ -148,5 +230,7 @@ Thread(target=run_web).start()
 
 # ================= RUN =================
 
+log.info("Bot started successfully")
 app.run()
+
 
