@@ -37,8 +37,13 @@ A powerful **Telegram file-sharing bot** with **private channel storage**, **for
 ---
 
 ## 📁 Project Structure
-telegram-file-bot/ ├── bot.py ├── requirements.txt └── README.md
-
+fileshare-bot/
+│
+├── main.py
+├── bot_handlers.py
+├── requirements.txt
+├── Dockerfile
+└── .dockerignore
 ---
 
 ## ⚙️ Requirements
